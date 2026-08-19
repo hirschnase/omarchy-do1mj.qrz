@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "do1mj.qrz",
+  "name": "QRZ",
+  "version": "1.0.0",
+  "author": "DO1MJ",
+  "license": "MIT",
+  "description": "Look up amateur radio callsigns on QRZ.com from the bar or a keyboard shortcut",
+  "kinds": [
+    "overlay",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "QRZ",
+    "description": "Amateur radio callsign lookup",
+    "category": "Info",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}
