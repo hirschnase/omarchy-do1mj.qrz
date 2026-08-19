@@ -55,7 +55,7 @@ Optional QRZ XML login is stored at `~/.config/do1mj.qrz/settings.json` (file mo
 
 ```json
 {
-  "username": "DO1MJ",
+  "username": "CALLSIGN",
   "password": "secret",
   "sessionKey": "…"
 }

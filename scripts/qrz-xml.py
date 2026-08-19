@@ -12,7 +12,7 @@ from pathlib import Path
 SETTINGS_DIR = Path.home() / ".config" / "do1mj.qrz"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 API_URL = "https://xmldata.qrz.com/xml/current/"
-AGENT = "do1mj.qrz/1.0"
+AGENT = "omarchy.plugin.qrz/1.0"
 
 
 def emit(payload):
