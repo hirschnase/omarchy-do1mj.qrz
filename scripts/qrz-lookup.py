@@ -2,14 +2,16 @@
 
 import base64
 import importlib.util
+import ipaddress
 import json
+import os
 import re
 import sys
 import urllib.error
 import urllib.request
 from html import unescape
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 # The dynamic import of qrz-xml.py below (via importlib) would otherwise let
 # Python write a bytecode cache into scripts/__pycache__ inside the plugin's
@@ -33,6 +35,169 @@ BIO_B64_RE = re.compile(
     r"""find\(['\"]#biodata['\"]\)\.html\(\s*Base64\.decode\(\s*['\"]([A-Za-z0-9+/=]+)['\"]\s*\)""",
     re.I,
 )
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}$")
+HOST_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
+MAPS_QUERY_RE = re.compile(r"^q=-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$")
+UNSAFE_URL_CHARS_RE = re.compile(r"[\x00-\x20\x7f\\]")
+MAPS_HOSTS = {"google.com", "www.google.com", "maps.google.com"}
+
+
+def ensure_private_dir(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def write_private_text(path, text):
+    ensure_private_dir(path.parent)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    data = text.encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def harden_private_dir(path):
+    try:
+        if not path.is_dir():
+            return
+        os.chmod(path, 0o700)
+        for child in path.iterdir():
+            if child.is_file():
+                os.chmod(child, 0o600)
+    except Exception:
+        pass
+
+
+def is_qrz_host(host):
+    return host == "qrz.com" or host.endswith(".qrz.com")
+
+
+def _parse_web_url(url):
+    raw = unescape(str(url or "")).strip()
+    if not raw or UNSAFE_URL_CHARS_RE.search(raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or not HOST_RE.fullmatch(host):
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port not in (None, 80, 443):
+        return None
+    return parsed, host
+
+
+def safe_qrz_url(url):
+    parsed = _parse_web_url(url)
+    if not parsed:
+        return ""
+    parsed, host = parsed
+    if not is_qrz_host(host):
+        return ""
+    return urlunparse(("https", host, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def safe_maps_url(url):
+    parsed = _parse_web_url(url)
+    if not parsed:
+        return ""
+    parsed, host = parsed
+    if host not in MAPS_HOSTS:
+        return ""
+    path = parsed.path or ""
+    if not path.startswith("/maps"):
+        return ""
+    if not MAPS_QUERY_RE.fullmatch(parsed.query or ""):
+        return ""
+    if parsed.params or parsed.fragment:
+        return ""
+    return urlunparse(("https", host, path, "", parsed.query, ""))
+
+
+def safe_email(value):
+    text = unescape(str(value or "")).strip()
+    if not EMAIL_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def safe_mailto(url):
+    raw = unescape(str(url or "")).strip()
+    if not raw or UNSAFE_URL_CHARS_RE.search(raw):
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    if (parsed.scheme or "").lower() != "mailto":
+        return ""
+    addr = safe_email(unquote(parsed.path or ""))
+    if not addr:
+        return ""
+    return "mailto:" + addr
+
+
+def safe_link_url(url):
+    raw = str(url or "").strip()
+    if raw.lower().startswith("mailto:"):
+        return safe_mailto(raw)
+    return safe_qrz_url(raw) or safe_maps_url(raw)
+
+
+def restrict_html_urls(html):
+    def src_repl(match):
+        url = safe_qrz_url(match.group(1))
+        return f'src="{url}"' if url else ""
+
+    def href_repl(match):
+        url = safe_link_url(match.group(1))
+        return f'href="{url}"' if url else 'href="#"'
+
+    text = html or ""
+    text = re.sub(r'\bsrc\s*=\s*["\']([^"\']*)["\']', src_repl, text, flags=re.I)
+    text = re.sub(r'\bhref\s*=\s*["\']([^"\']*)["\']', href_repl, text, flags=re.I)
+    text = re.sub(r'\s+srcset\s*=\s*["\'][^"\']*["\']', "", text, flags=re.I)
+
+    def img_repl(match):
+        tag = match.group(0)
+        if re.search(r'\bsrc\s*=\s*["\'][^"\']+["\']', tag, re.I):
+            return tag
+        return ""
+
+    return re.sub(r"<img\b[^>]*>", img_repl, text, flags=re.I)
+
+
+def sanitize_payload(payload):
+    if not isinstance(payload, dict):
+        return payload
+    payload["url"] = safe_qrz_url(payload.get("url") or "")
+    payload["photo"] = safe_qrz_url(payload.get("photo") or "")
+    payload["flag"] = safe_qrz_url(payload.get("flag") or "")
+    payload["xmlMapsUrl"] = safe_maps_url(payload.get("xmlMapsUrl") or "")
+    payload["xmlEmail"] = safe_email(payload.get("xmlEmail") or "")
+    payload["biodataHtml"] = restrict_html_urls(payload.get("biodataHtml") or "")
+    return payload
 
 
 def empty(**overrides):
@@ -76,14 +241,13 @@ def emit(payload):
             payload["serial"] = int(sys.argv[3])
         except Exception:
             payload["serial"] = 0
+    payload = sanitize_payload(payload)
     text = json.dumps(payload, ensure_ascii=False) + "\n"
     out_path = sys.argv[2] if len(sys.argv) > 2 else ""
     if out_path:
         dest = Path(out_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(dest)
+        write_private_text(dest, text)
+        harden_private_dir(dest.parent)
         _cleanup_old_results(dest)
         return
     sys.stdout.write(text)
@@ -95,6 +259,7 @@ def _cleanup_old_results(current):
     # fresh one. That means this directory would otherwise grow by one file
     # per search forever; keep only the most recent few.
     try:
+        harden_private_dir(current.parent)
         candidates = sorted(
             current.parent.glob("lookup-*.json"),
             key=lambda p: p.stat().st_mtime,
@@ -268,6 +433,7 @@ def rich_html(html):
     text = delazify_images(text)
     text = sanitize_images(text)
     text = absolutize_urls(text)
+    text = restrict_html_urls(text)
     return text.strip()
 
 

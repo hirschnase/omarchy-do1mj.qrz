@@ -149,6 +149,164 @@ Item {
     return /^(?:[A-Z0-9]{1,3}\/)?[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,5}(?:\/[A-Z0-9]{1,8})?$/.test(value)
   }
 
+  function hasUnsafeUrlChars(value) {
+    var s = String(value || "")
+    for (var i = 0; i < s.length; i++) {
+      var code = s.charCodeAt(i)
+      if (code <= 32 || code === 127 || code === 92)
+        return true
+    }
+    return false
+  }
+
+  function parseHttpUrl(url) {
+    var s = String(url || "").trim()
+    if (!s || root.hasUnsafeUrlChars(s))
+      return null
+    var match = s.match(/^(https?):\/\/([^\/?#]+)(\/[^?#]*)?(\?[^#]*)?(#.*)?$/i)
+    if (!match)
+      return null
+    var netloc = match[2]
+    var at = netloc.lastIndexOf("@")
+    if (at !== -1)
+      netloc = netloc.slice(at + 1)
+    if (netloc.charAt(0) === "[")
+      return null
+    var host = netloc
+    var port = ""
+    var colon = host.lastIndexOf(":")
+    if (colon !== -1) {
+      port = host.slice(colon + 1)
+      host = host.slice(0, colon)
+      if (!/^\d+$/.test(port) || (port !== "80" && port !== "443"))
+        return null
+    }
+    host = host.toLowerCase()
+    while (host.length && host.charAt(host.length - 1) === ".")
+      host = host.slice(0, host.length - 1)
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host))
+      return null
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(host))
+      return null
+    return {
+      host: host,
+      path: match[3] || "",
+      query: match[4] ? match[4].slice(1) : "",
+      fragment: match[5] ? match[5].slice(1) : ""
+    }
+  }
+
+  function isQrzHost(host) {
+    var h = String(host || "")
+    return h === "qrz.com" || h.slice(-8) === ".qrz.com"
+  }
+
+  function safeQrzUrl(url) {
+    var parsed = root.parseHttpUrl(url)
+    if (!parsed || !root.isQrzHost(parsed.host))
+      return ""
+    var out = "https://" + parsed.host + parsed.path
+    if (parsed.query)
+      out += "?" + parsed.query
+    if (parsed.fragment)
+      out += "#" + parsed.fragment
+    return out
+  }
+
+  function safeMapsUrl(url) {
+    var parsed = root.parseHttpUrl(url)
+    if (!parsed)
+      return ""
+    if (parsed.host !== "www.google.com" && parsed.host !== "google.com" && parsed.host !== "maps.google.com")
+      return ""
+    if (parsed.path.indexOf("/maps") !== 0)
+      return ""
+    if (!/^q=-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$/.test(parsed.query))
+      return ""
+    if (parsed.fragment)
+      return ""
+    return "https://" + parsed.host + parsed.path + "?" + parsed.query
+  }
+
+  function safeEmail(value) {
+    var s = String(value || "").trim()
+    if (!/^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}$/.test(s))
+      return ""
+    return s
+  }
+
+  function safeMailto(url) {
+    var s = String(url || "").trim()
+    if (!s || root.hasUnsafeUrlChars(s))
+      return ""
+    var match = s.match(/^mailto:([^?#]*)/i)
+    if (!match)
+      return ""
+    var addr = match[1]
+    try { addr = decodeURIComponent(addr) } catch (e) { return "" }
+    addr = root.safeEmail(addr)
+    return addr ? ("mailto:" + addr) : ""
+  }
+
+  function openSafeUrl(url) {
+    var s = String(url || "").trim()
+    var safe = s.slice(0, 7).toLowerCase() === "mailto:" ? root.safeMailto(s) : (root.safeQrzUrl(s) || root.safeMapsUrl(s))
+    if (safe)
+      Qt.openUrlExternally(safe)
+  }
+
+  function rewriteQuotedAttr(html, attrName, kind) {
+    var text = String(html || "")
+    var lower = text.toLowerCase()
+    var needle = attrName + "="
+    var out = ""
+    var i = 0
+    while (i < text.length) {
+      var pos = lower.indexOf(needle, i)
+      while (pos !== -1 && pos > 0 && /[A-Za-z0-9_-]/.test(text.charAt(pos - 1)))
+        pos = lower.indexOf(needle, pos + 1)
+      if (pos === -1) {
+        out += text.slice(i)
+        break
+      }
+      out += text.slice(i, pos)
+      var cursor = pos + needle.length
+      while (cursor < text.length && (text.charAt(cursor) === " " || text.charAt(cursor) === "\t"))
+        cursor += 1
+      var quote = text.charAt(cursor)
+      if (quote !== '"' && quote !== "'") {
+        out += text.slice(pos, cursor)
+        i = cursor
+        continue
+      }
+      var end = text.indexOf(quote, cursor + 1)
+      if (end === -1) {
+        out += text.slice(pos)
+        break
+      }
+      var raw = text.slice(cursor + 1, end)
+      var safe = ""
+      if (kind === "src")
+        safe = root.safeQrzUrl(raw)
+      else if (String(raw).trim().slice(0, 7).toLowerCase() === "mailto:")
+        safe = root.safeMailto(raw)
+      else
+        safe = root.safeQrzUrl(raw) || root.safeMapsUrl(raw)
+      if (kind === "src")
+        out += safe ? (attrName + '="' + safe + '"') : ""
+      else
+        out += attrName + '="' + (safe || "#") + '"'
+      i = end + 1
+    }
+    return out
+  }
+
+  function restrictHtmlUrls(html) {
+    var text = root.rewriteQuotedAttr(html, "src", "src")
+    text = root.rewriteQuotedAttr(text, "href", "href")
+    return text
+  }
+
   function resetResult() {
     root.pageKind = ""
     root.resultCallsign = ""
@@ -447,19 +605,19 @@ Item {
     }
     root.resultCallsign = String(payload.callsign || root.activeCallsign)
     root.resultCountry = String(payload.country || "")
-    root.resultFlag = String(payload.flag || "")
+    root.resultFlag = root.safeQrzUrl(payload.flag || "")
     root.resultQsl = String(payload.qsl || "")
     root.resultManager = String(payload.manager || "")
     root.resultLookups = String(payload.lookups || "")
     root.resultError = String(payload.error || "")
-    root.resultUrl = String(payload.url || "")
+    root.resultUrl = root.safeQrzUrl(payload.url || "")
     root.xmlName = String(payload.xmlName || "")
-    root.xmlEmail = String(payload.xmlEmail || "")
+    root.xmlEmail = root.safeEmail(payload.xmlEmail || "")
     root.xmlAddress = String(payload.xmlAddress || "")
     root.xmlGrid = String(payload.xmlGrid || "")
     root.xmlLat = String(payload.xmlLat || "")
     root.xmlLon = String(payload.xmlLon || "")
-    root.xmlMapsUrl = String(payload.xmlMapsUrl || "")
+    root.xmlMapsUrl = root.safeMapsUrl(payload.xmlMapsUrl || "")
     root.xmlCounty = String(payload.xmlCounty || "")
     root.xmlClass = String(payload.xmlClass || "")
     root.xmlCq = String(payload.xmlCq || "")
@@ -477,8 +635,8 @@ Item {
     else
       root.pageKind = "error"
     root.statusText = ""
-    var photo = String(payload.photo || "")
-    var bio = String(payload.biodataHtml || "")
+    var photo = root.safeQrzUrl(payload.photo || "")
+    var bio = root.restrictHtmlUrls(payload.biodataHtml || "")
     Qt.callLater(function() {
       if (serial !== root.requestSerial) return
       root.resultPhoto = photo
@@ -801,7 +959,7 @@ Item {
 
               Text {
                 width: parent.width
-                text: "Saved in ~/.config/do1mj.qrz/settings.json (mode 600). The session key is reused so you stay signed in."
+                text: "Saved in ~/.config/do1mj.qrz/settings.json (directory mode 700, file mode 600). The session key is reused so you stay signed in."
                 color: root.resultMuted
                 wrapMode: Text.Wrap
                 font.family: root.fontFamily
@@ -1049,7 +1207,7 @@ Item {
                         Image {
                           anchors.fill: parent
                           anchors.margins: 1
-                          source: root.resultPhoto
+                          source: root.safeQrzUrl(root.resultPhoto)
                           fillMode: Image.PreserveAspectCrop
                           asynchronous: true
                         }
@@ -1075,7 +1233,7 @@ Item {
 
                           Image {
                             visible: root.resultFlag !== ""
-                            source: root.resultFlag
+                            source: root.safeQrzUrl(root.resultFlag)
                             width: Style.space(24)
                             height: Style.space(16)
                             fillMode: Image.PreserveAspectFit
@@ -1120,7 +1278,7 @@ Item {
                           wrapMode: Text.Wrap
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.body
-                          onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                          onLinkActivated: function(link) { root.openSafeUrl(link) }
                         }
 
                         Text {
@@ -1202,7 +1360,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: Qt.openUrlExternally(root.xmlMapsUrl)
+                            onClicked: root.openSafeUrl(root.xmlMapsUrl)
                           }
                         }
 
@@ -1252,7 +1410,7 @@ Item {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       text: root.styledBio
-                      onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                      onLinkActivated: function(link) { root.openSafeUrl(link) }
                     }
                   }
                 }

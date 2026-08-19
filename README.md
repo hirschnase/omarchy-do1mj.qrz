@@ -51,7 +51,7 @@ make install
 
 ## Configuration
 
-Optional QRZ XML login is stored at `~/.config/do1mj.qrz/settings.json` (file mode `600`):
+Optional QRZ XML login is stored at `~/.config/do1mj.qrz/settings.json` (directory mode `700`, file mode `600`):
 
 ```json
 {
@@ -108,8 +108,10 @@ omarchy-shell shell summon do1mj.qrz '{"callsign":"W1AW"}'
 
 - Launches `python3 scripts/qrz-lookup.py <CALLSIGN>` and `python3 scripts/qrz-xml.py <load|save|check>` with structured arguments (no shell interpolation)
 - Contacts `https://www.qrz.com/db/<CALLSIGN>` and `https://xmldata.qrz.com/xml/current/`
-- May load QRZ CDN/static images (photo, flag, biography)
-- Stores QRZ username, password, and session key in `~/.config/do1mj.qrz/settings.json` with mode `600`
+- May load QRZ CDN/static images (photo, flag, biography) after scheme and host checks (`https` on `qrz.com` / `*.qrz.com`)
+- Opens only allowlisted external URLs: QRZ `https` links, `mailto:` addresses, and `https://www.google.com/maps?q=lat,lon`
+- Stores QRZ username, password, and session key in `~/.config/do1mj.qrz/settings.json` (directory mode `700`, file mode `600`)
+- Caches lookup results, including authenticated personal fields, in `~/.cache/do1mj.qrz` (directory mode `700`, file mode `600`)
 - Does not log passwords or callsigns
 - `make install` writes a marked block to `~/.config/hypr/bindings.lua`
 - No privileged actions

@@ -2,12 +2,15 @@
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+COORD_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
 SETTINGS_DIR = Path.home() / ".config" / "do1mj.qrz"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
@@ -31,7 +34,40 @@ def read_stdin_json():
     return data if isinstance(data, dict) else {}
 
 
+def ensure_private_dir(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def write_private_text(path, text):
+    ensure_private_dir(path.parent)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    data = text.encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def harden_settings_paths():
+    try:
+        if SETTINGS_DIR.is_dir():
+            os.chmod(SETTINGS_DIR, 0o700)
+        if SETTINGS_FILE.is_file():
+            os.chmod(SETTINGS_FILE, 0o600)
+    except Exception:
+        pass
+
+
 def load_settings():
+    harden_settings_paths()
     if not SETTINGS_FILE.is_file():
         return {"username": "", "password": "", "sessionKey": "", "authError": ""}
     try:
@@ -49,18 +85,29 @@ def load_settings():
 
 
 def save_settings(data):
-    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "username": str(data.get("username") or ""),
         "password": str(data.get("password") or ""),
         "sessionKey": str(data.get("sessionKey") or ""),
         "authError": str(data.get("authError") or ""),
     }
-    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(SETTINGS_FILE)
-    os.chmod(SETTINGS_FILE, 0o600)
+    write_private_text(SETTINGS_FILE, json.dumps(payload, indent=2) + "\n")
+    harden_settings_paths()
+
+
+def google_maps_url(lat, lon):
+    lat_s = str(lat or "").strip()
+    lon_s = str(lon or "").strip()
+    if not COORD_RE.fullmatch(lat_s) or not COORD_RE.fullmatch(lon_s):
+        return ""
+    try:
+        lat_f = float(lat_s)
+        lon_f = float(lon_s)
+    except ValueError:
+        return ""
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return ""
+    return f"https://www.google.com/maps?q={lat_s},{lon_s}"
 
 
 def local_tag(tag):
@@ -193,7 +240,7 @@ def lookup_callsign(callsign):
     address = ", ".join([part for part in addr_parts if part])
     lat = call.get("lat") or ""
     lon = call.get("lon") or ""
-    maps_url = f"https://www.google.com/maps?q={lat},{lon}" if lat and lon else ""
+    maps_url = google_maps_url(lat, lon)
     name = call.get("name_fmt") or " ".join(
         part for part in (call.get("fname") or "", call.get("nickname") and f'"{call.get("nickname")}"' or "", call.get("name") or "") if part
     ).strip()
