@@ -357,8 +357,17 @@ Item {
       if (settingsProc.kind === "load") {
         settingsUserField.text = root.settingsUsername
         settingsPassField.text = ""
-        root.settingsStatus = root.settingsHasSession ? "Signed in" : (root.settingsHasPassword ? "Password saved" : "")
-        root.settingsOk = root.settingsHasSession
+        var authError = String(payload.authError || "")
+        if (authError) {
+          // A previous automatic session renewal failed and hasn't been
+          // cleared by a fresh Save/Check yet — surface that here rather
+          // than silently retrying it on every lookup.
+          root.settingsStatus = "Automatic sign-in failed: " + authError + " — update your credentials and save."
+          root.settingsOk = false
+        } else {
+          root.settingsStatus = root.settingsHasSession ? "Signed in" : (root.settingsHasPassword ? "Password saved" : "")
+          root.settingsOk = root.settingsHasSession
+        }
       } else {
         root.settingsOk = payload.ok === true
         root.settingsStatus = payload.ok ? "Credentials accepted" : (payload.error || "Login failed")

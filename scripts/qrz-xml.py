@@ -33,17 +33,18 @@ def read_stdin_json():
 
 def load_settings():
     if not SETTINGS_FILE.is_file():
-        return {"username": "", "password": "", "sessionKey": ""}
+        return {"username": "", "password": "", "sessionKey": "", "authError": ""}
     try:
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"username": "", "password": "", "sessionKey": ""}
+        return {"username": "", "password": "", "sessionKey": "", "authError": ""}
     if not isinstance(data, dict):
-        return {"username": "", "password": "", "sessionKey": ""}
+        return {"username": "", "password": "", "sessionKey": "", "authError": ""}
     return {
         "username": str(data.get("username") or ""),
         "password": str(data.get("password") or ""),
         "sessionKey": str(data.get("sessionKey") or ""),
+        "authError": str(data.get("authError") or ""),
     }
 
 
@@ -53,6 +54,7 @@ def save_settings(data):
         "username": str(data.get("username") or ""),
         "password": str(data.get("password") or ""),
         "sessionKey": str(data.get("sessionKey") or ""),
+        "authError": str(data.get("authError") or ""),
     }
     tmp = SETTINGS_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -124,6 +126,15 @@ def session_needs_login(session):
 
 def lookup_callsign(callsign):
     settings = load_settings()
+
+    # A previous automatic renewal already failed and the stored credentials
+    # have not changed since (that only happens via a fresh Save/Check from
+    # the settings page, which clears this field). Don't hammer QRZ's login
+    # endpoint again on every lookup with credentials already known to be
+    # bad; the failure is surfaced in the settings page instead.
+    if settings["authError"]:
+        return None
+
     if not settings["sessionKey"] and not (settings["username"] and settings["password"]):
         return None
 
@@ -131,25 +142,38 @@ def lookup_callsign(callsign):
         raw = xml_request({"s": key, "callsign": callsign})
         return parse_xml(raw)
 
+    def renew():
+        if not (settings["username"] and settings["password"]):
+            return False
+        ok, message, key = login(settings["username"], settings["password"])
+        if ok:
+            settings["sessionKey"] = key
+            settings["authError"] = ""
+            save_settings(settings)
+            return True
+        # Renewal failed: drop the now-unusable key and remember why, so the
+        # next lookup skips straight to "not attempting" instead of retrying
+        # the same failing login.
+        settings["sessionKey"] = ""
+        settings["authError"] = message or "QRZ login failed"
+        save_settings(settings)
+        return False
+
     key = settings["sessionKey"]
     if not key:
-        ok, _message, key = login(settings["username"], settings["password"])
-        if not ok:
+        if not renew():
             return None
-        settings["sessionKey"] = key
-        save_settings(settings)
+        key = settings["sessionKey"]
 
     try:
         session, call = fetch(key)
     except Exception:
         return None
 
-    if session_needs_login(session) and settings["username"] and settings["password"]:
-        ok, _message, key = login(settings["username"], settings["password"])
-        if not ok:
-            return {"error": session.get("Error") or "QRZ session expired"}
-        settings["sessionKey"] = key
-        save_settings(settings)
+    if session_needs_login(session):
+        if not renew():
+            return {"error": settings["authError"]}
+        key = settings["sessionKey"]
         try:
             session, call = fetch(key)
         except Exception:
@@ -203,6 +227,7 @@ def cmd_load():
         "username": settings["username"],
         "hasPassword": bool(settings["password"]),
         "hasSession": bool(settings["sessionKey"]),
+        "authError": settings["authError"],
     })
 
 
@@ -218,12 +243,17 @@ def cmd_save():
     if not settings["username"] or not settings["password"]:
         emit({"ok": False, "error": "Username and password are required"})
         return
+    # Saving is the explicit "try these credentials" action, so it always
+    # re-arms automatic renewal regardless of any prior recorded failure.
+    settings["authError"] = ""
     ok, message, key = login(settings["username"], settings["password"])
     if ok:
         settings["sessionKey"] = key
         save_settings(settings)
         emit({"ok": True, "hasSession": True, "error": ""})
         return
+    settings["sessionKey"] = ""
+    settings["authError"] = message or "QRZ login failed"
     save_settings(settings)
     emit({"ok": False, "hasSession": False, "error": message})
 
@@ -238,9 +268,13 @@ def cmd_check():
         settings["username"] = username
         settings["password"] = password
         settings["sessionKey"] = key
+        settings["authError"] = ""
         save_settings(settings)
         emit({"ok": True, "hasSession": True, "error": ""})
         return
+    settings["sessionKey"] = ""
+    settings["authError"] = message or "QRZ login failed"
+    save_settings(settings)
     emit({"ok": False, "hasSession": False, "error": message})
 
 

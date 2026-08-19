@@ -57,11 +57,12 @@ Optional QRZ XML login is stored at `~/.config/do1mj.qrz/settings.json` (file mo
 {
   "username": "CALLSIGN",
   "password": "secret",
-  "sessionKey": "…"
+  "sessionKey": "…",
+  "authError": ""
 }
 ```
 
-Open the overlay and click the gear icon to enter credentials, save them, or check the login. A valid session key is reused on later lookups.
+Open the overlay and click the gear icon to enter credentials, save them, or check the login. A valid session key is reused on later lookups and renewed automatically from the stored username/password when it expires. If that automatic renewal fails, the failure is recorded in `authError` and shown in the settings page instead of being retried on every subsequent lookup; renewal only resumes once you save or successfully check new credentials.
 
 The widget is placed in the bar `right` section by default.
 
