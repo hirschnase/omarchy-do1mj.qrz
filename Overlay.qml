@@ -107,7 +107,7 @@ Item {
     "<style>"
     + "body,p,li,div,span,td,th { font-family: sans-serif; font-size: " + Style.font.body + "px; color: " + root.colorHex(root.resultFg) + "; line-height: 1.5; }"
     + "h1,h2,h3,h4 { color: " + root.colorHex(root.resultFg) + "; margin: 0.6em 0 0.3em; }"
-    + "a { color: " + root.colorHex(root.resultAccent) + "; text-decoration: underline; }"
+    + "a { color: " + root.colorHex(root.resultFg) + "; text-decoration: none; }"
     + "img { max-width: 100%; height: auto; border-radius: 6px; margin: 6px 0; }"
     + "table { border-collapse: collapse; width: 100%; }"
     + "td, th { padding: 4px 6px; border-bottom: 1px solid " + root.colorHex(root.resultBorder) + "; }"
@@ -189,6 +189,7 @@ Item {
     if (/^\d+\.\d+\.\d+\.\d+$/.test(host))
       return null
     return {
+      scheme: match[1].toLowerCase() === "http" ? "http" : "https",
       host: host,
       path: match[3] || "",
       query: match[4] ? match[4].slice(1) : "",
@@ -255,56 +256,268 @@ Item {
       Qt.openUrlExternally(safe)
   }
 
-  function rewriteQuotedAttr(html, attrName, kind) {
-    var text = String(html || "")
-    var lower = text.toLowerCase()
-    var needle = attrName + "="
-    var out = ""
+  function isHtmlSpace(ch) {
+    return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f"
+  }
+
+  function parseHtmlAttrs(attrStr) {
+    var attrs = []
+    var text = String(attrStr || "")
     var i = 0
     while (i < text.length) {
-      var pos = lower.indexOf(needle, i)
-      while (pos !== -1 && pos > 0 && /[A-Za-z0-9_-]/.test(text.charAt(pos - 1)))
-        pos = lower.indexOf(needle, pos + 1)
-      if (pos === -1) {
-        out += text.slice(i)
+      while (i < text.length && root.isHtmlSpace(text.charAt(i)))
+        i += 1
+      if (i >= text.length || text.charAt(i) === "/")
         break
-      }
-      out += text.slice(i, pos)
-      var cursor = pos + needle.length
-      while (cursor < text.length && (text.charAt(cursor) === " " || text.charAt(cursor) === "\t"))
-        cursor += 1
-      var quote = text.charAt(cursor)
-      if (quote !== '"' && quote !== "'") {
-        out += text.slice(pos, cursor)
-        i = cursor
+      var start = i
+      while (i < text.length && !root.isHtmlSpace(text.charAt(i)) && text.charAt(i) !== "=" && text.charAt(i) !== "/")
+        i += 1
+      var name = text.slice(start, i)
+      if (!name) {
+        i += 1
         continue
       }
-      var end = text.indexOf(quote, cursor + 1)
-      if (end === -1) {
-        out += text.slice(pos)
-        break
+      while (i < text.length && root.isHtmlSpace(text.charAt(i)))
+        i += 1
+      if (i < text.length && text.charAt(i) === "=") {
+        i += 1
+        while (i < text.length && root.isHtmlSpace(text.charAt(i)))
+          i += 1
+        if (i >= text.length) {
+          attrs.push({ name: name, value: "" })
+          break
+        }
+        var quote = text.charAt(i)
+        if (quote === '"' || quote === "'") {
+          i += 1
+          start = i
+          while (i < text.length && text.charAt(i) !== quote)
+            i += 1
+          attrs.push({ name: name, value: text.slice(start, i) })
+          if (i < text.length)
+            i += 1
+        } else {
+          start = i
+          while (i < text.length) {
+            var ch = text.charAt(i)
+            if (root.isHtmlSpace(ch) || ch === ">" || ch === '"' || ch === "'" || ch === "=" || ch === "`")
+              break
+            i += 1
+          }
+          attrs.push({ name: name, value: text.slice(start, i) })
+        }
+      } else {
+        attrs.push({ name: name, value: null })
       }
-      var raw = text.slice(cursor + 1, end)
-      var safe = ""
-      if (kind === "src")
-        safe = root.safeQrzUrl(raw)
-      else if (String(raw).trim().slice(0, 7).toLowerCase() === "mailto:")
-        safe = root.safeMailto(raw)
-      else
-        safe = root.safeQrzUrl(raw) || root.safeMapsUrl(raw)
-      if (kind === "src")
-        out += safe ? (attrName + '="' + safe + '"') : ""
-      else
-        out += attrName + '="' + (safe || "#") + '"'
-      i = end + 1
     }
+    return attrs
+  }
+
+  function cssUrl(value) {
+    var match = String(value || "").match(/url\s*\(\s*(['"]?)([^)'"]+)\1\s*\)/i)
+    return match ? String(match[2] || "").trim() : ""
+  }
+
+  function sanitizeCss(style) {
+    var parts = String(style || "").split(";")
+    var kept = []
+    for (var i = 0; i < parts.length; i++) {
+      var piece = parts[i].trim()
+      if (!piece)
+        continue
+      var colon = piece.indexOf(":")
+      if (colon === -1)
+        continue
+      var name = piece.slice(0, colon).trim().toLowerCase()
+      var value = piece.slice(colon + 1)
+      if (name === "background-image" || name === "list-style-image" || name === "border-image") {
+        var imageUrl = root.cssUrl(value)
+        var safeImage = imageUrl ? root.safeQrzUrl(imageUrl) : ""
+        if (safeImage)
+          kept.push(name + ": url(" + safeImage + ")")
+        continue
+      }
+      if (name === "background") {
+        var bgUrl = root.cssUrl(value)
+        var rest = value.replace(/url\s*\(\s*(['"]?)[^)'"]+\1\s*\)/gi, "").trim()
+        var bits = []
+        if (rest)
+          bits.push(rest)
+        if (bgUrl) {
+          var safeBg = root.safeQrzUrl(bgUrl)
+          if (safeBg)
+            bits.push("url(" + safeBg + ")")
+        }
+        if (bits.length)
+          kept.push("background: " + bits.join(" "))
+        continue
+      }
+      if (value.toLowerCase().indexOf("url(") !== -1)
+        continue
+      kept.push(piece)
+    }
+    return kept.join("; ")
+  }
+
+  function quoteHtmlAttr(name, value) {
+    return " " + name + '="' + String(value).replace(/"/g, "&quot;") + '"'
+  }
+
+  function formatRestrictedAttrs(attrs) {
+    var parts = ""
+    var hasSrc = false
+    for (var i = 0; i < attrs.length; i++) {
+      var name = String(attrs[i].name || "")
+      var value = attrs[i].value
+      var lname = name.toLowerCase()
+      if (lname.indexOf("on") === 0)
+        continue
+      if (value === null) {
+        parts += " " + name
+        continue
+      }
+      if (lname === "style") {
+        var cleaned = root.sanitizeCss(value)
+        if (cleaned)
+          parts += root.quoteHtmlAttr("style", cleaned)
+        continue
+      }
+      if (lname === "src" || lname === "source" || lname === "background" || lname === "poster" || lname === "dynsrc" || lname === "lowsrc") {
+        var url = root.safeQrzUrl(value)
+        if (!url)
+          continue
+        var attr = (lname === "source" || lname === "src") ? "src" : lname
+        if (attr === "src")
+          hasSrc = true
+        parts += root.quoteHtmlAttr(attr, url)
+        continue
+      }
+      if (lname === "href")
+        continue
+      if (lname === "srcset" || lname === "cite" || lname === "formaction" || lname === "action" || lname === "longdesc" || lname === "usemap" || lname === "codebase" || lname === "classid" || lname === "data" || lname.indexOf("src") !== -1)
+        continue
+      parts += root.quoteHtmlAttr(name, value)
+    }
+    return { html: parts, hasSrc: hasSrc }
+  }
+
+  function displayLinkUrl(url) {
+    var s = String(url || "").trim()
+    if (!s || s === "#")
+      return ""
+    if (s.slice(0, 7).toLowerCase() === "mailto:")
+      return root.safeMailto(s)
+    var parsed = root.parseHttpUrl(s)
+    if (!parsed)
+      return ""
+    var out = parsed.scheme + "://" + parsed.host + parsed.path
+    if (parsed.query)
+      out += "?" + parsed.query
+    if (parsed.fragment)
+      out += "#" + parsed.fragment
     return out
   }
 
+  function attrHref(attrs) {
+    for (var i = 0; i < attrs.length; i++) {
+      if (String(attrs[i].name || "").toLowerCase() !== "href")
+        continue
+      return root.displayLinkUrl(attrs[i].value || "")
+    }
+    return ""
+  }
+
+  function escapeHtmlText(value) {
+    return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
+  function anchorSuffix(href) {
+    return href ? (" [" + root.escapeHtmlText(href) + "]") : ""
+  }
+
   function restrictHtmlUrls(html) {
-    var text = root.rewriteQuotedAttr(html, "src", "src")
-    text = root.rewriteQuotedAttr(text, "href", "href")
-    return text
+    var text = String(html || "")
+    var out = ""
+    var i = 0
+    var hrefStack = []
+    while (i < text.length) {
+      var lt = text.indexOf("<", i)
+      if (lt === -1) {
+        out += text.slice(i)
+        break
+      }
+      out += text.slice(i, lt)
+      if (text.slice(lt, lt + 4) === "<!--") {
+        var commentEnd = text.indexOf("-->", lt + 4)
+        if (commentEnd === -1)
+          break
+        i = commentEnd + 3
+        continue
+      }
+      if (lt + 1 < text.length && text.charAt(lt + 1) === "/") {
+        var closeEnd = text.indexOf(">", lt)
+        if (closeEnd === -1)
+          break
+        var closeName = text.slice(lt + 2, closeEnd).trim().split(/\s+/)[0] || ""
+        if (closeName.toLowerCase() === "a") {
+          var href = hrefStack.length ? hrefStack.pop() : ""
+          out += root.anchorSuffix(href)
+        } else {
+          out += text.slice(lt, closeEnd + 1)
+        }
+        i = closeEnd + 1
+        continue
+      }
+      var j = lt + 1
+      if (j < text.length && text.charAt(j) === "!") {
+        var declEnd = text.indexOf(">", j)
+        i = declEnd === -1 ? text.length : declEnd + 1
+        continue
+      }
+      if (j >= text.length || !/[A-Za-z]/.test(text.charAt(j))) {
+        out += "<"
+        i = lt + 1
+        continue
+      }
+      var nameStart = j
+      while (j < text.length && /[A-Za-z0-9:-]/.test(text.charAt(j)))
+        j += 1
+      var tag = text.slice(nameStart, j)
+      var quote = ""
+      while (j < text.length) {
+        var ch = text.charAt(j)
+        if (quote) {
+          if (ch === quote)
+            quote = ""
+        } else if (ch === '"' || ch === "'") {
+          quote = ch
+        } else if (ch === ">") {
+          break
+        }
+        j += 1
+      }
+      if (j >= text.length)
+        break
+      var attrStr = text.slice(lt + 1 + tag.length, j)
+      var selfClose = attrStr.replace(/\s+$/, "").slice(-1) === "/"
+      if (selfClose)
+        attrStr = attrStr.replace(/\s+$/, "").slice(0, -1)
+      var parsedAttrs = root.parseHtmlAttrs(attrStr)
+      if (tag.toLowerCase() === "a") {
+        var anchorHref = root.attrHref(parsedAttrs)
+        if (selfClose)
+          out += root.anchorSuffix(anchorHref).replace(/^\s+/, "")
+        else
+          hrefStack.push(anchorHref)
+        i = j + 1
+        continue
+      }
+      var rewritten = root.formatRestrictedAttrs(parsedAttrs)
+      if (!(tag.toLowerCase() === "img" && !rewritten.hasSrc))
+        out += "<" + tag + rewritten.html + (selfClose ? " />" : ">")
+      i = j + 1
+    }
+    return out
   }
 
   function resetResult() {
@@ -1410,7 +1623,6 @@ Item {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       text: root.styledBio
-                      onLinkActivated: function(link) { root.openSafeUrl(link) }
                     }
                   }
                 }

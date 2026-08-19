@@ -165,27 +165,285 @@ def safe_link_url(url):
     return safe_qrz_url(raw) or safe_maps_url(raw)
 
 
-def restrict_html_urls(html):
-    def src_repl(match):
-        url = safe_qrz_url(match.group(1))
-        return f'src="{url}"' if url else ""
-
-    def href_repl(match):
-        url = safe_link_url(match.group(1))
-        return f'href="{url}"' if url else 'href="#"'
-
-    text = html or ""
-    text = re.sub(r'\bsrc\s*=\s*["\']([^"\']*)["\']', src_repl, text, flags=re.I)
-    text = re.sub(r'\bhref\s*=\s*["\']([^"\']*)["\']', href_repl, text, flags=re.I)
-    text = re.sub(r'\s+srcset\s*=\s*["\'][^"\']*["\']', "", text, flags=re.I)
-
-    def img_repl(match):
-        tag = match.group(0)
-        if re.search(r'\bsrc\s*=\s*["\'][^"\']+["\']', tag, re.I):
-            return tag
+def display_link_url(url):
+    raw = unescape(str(url or "")).strip()
+    if not raw or raw == "#" or UNSAFE_URL_CHARS_RE.search(raw):
         return ""
+    if raw.lower().startswith("mailto:"):
+        return safe_mailto(raw)
+    parsed = _parse_web_url(raw)
+    if not parsed:
+        return ""
+    parsed, host = parsed
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in ("http", "https"):
+        return ""
+    return urlunparse((scheme, host, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
-    return re.sub(r"<img\b[^>]*>", img_repl, text, flags=re.I)
+
+CSS_URL_RE = re.compile(r"""url\s*\(\s*(['"]?)([^)'"]+)\1\s*\)""", re.I)
+RESOURCE_ATTRS = {
+    "src",
+    "source",
+    "background",
+    "poster",
+    "dynsrc",
+    "lowsrc",
+}
+DROP_ATTRS = {
+    "srcset",
+    "poster",
+    "cite",
+    "formaction",
+    "action",
+    "longdesc",
+    "dynsrc",
+    "lowsrc",
+    "usemap",
+    "codebase",
+    "classid",
+    "data",
+}
+
+
+def extract_css_url(value):
+    match = CSS_URL_RE.search(value or "")
+    if not match:
+        return ""
+    return match.group(2).strip()
+
+
+def sanitize_style(style):
+    kept = []
+    for part in (style or "").split(";"):
+        piece = part.strip()
+        if not piece or ":" not in piece:
+            continue
+        name, value = piece.split(":", 1)
+        lname = name.strip().lower()
+        lvalue = value.strip()
+        if lname == "color" and re.fullmatch(r"#fff(?:fff)?|white", lvalue, re.I):
+            continue
+        if lname == "background-color":
+            continue
+        if lname in ("background-image", "list-style-image", "border-image"):
+            url = safe_qrz_url(extract_css_url(value))
+            if url:
+                kept.append(f"{lname}: url({url})")
+            continue
+        if lname == "background":
+            url = extract_css_url(value)
+            safe = safe_qrz_url(url) if url else ""
+            if safe:
+                kept.append(f"background-image: url({safe})")
+            continue
+        if "url(" in value.lower():
+            continue
+        kept.append(piece)
+    return "; ".join(kept)
+
+
+def parse_html_attrs(attr_str):
+    attrs = []
+    i = 0
+    n = len(attr_str or "")
+    text = attr_str or ""
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n or text[i] == "/":
+            break
+        start = i
+        while i < n and not text[i].isspace() and text[i] not in "=/":
+            i += 1
+        name = text[start:i]
+        if not name:
+            i += 1
+            continue
+        while i < n and text[i].isspace():
+            i += 1
+        if i < n and text[i] == "=":
+            i += 1
+            while i < n and text[i].isspace():
+                i += 1
+            if i >= n:
+                attrs.append((name, ""))
+                break
+            if text[i] in "\"'":
+                quote = text[i]
+                i += 1
+                start = i
+                while i < n and text[i] != quote:
+                    i += 1
+                attrs.append((name, text[start:i]))
+                if i < n:
+                    i += 1
+            else:
+                start = i
+                while i < n and not text[i].isspace() and text[i] not in ">\"'`=":
+                    i += 1
+                attrs.append((name, text[start:i]))
+        else:
+            attrs.append((name, None))
+    return attrs
+
+
+def _quote_attr(name, value):
+    escaped = str(value).replace('"', "&quot;")
+    return f' {name}="{escaped}"'
+
+
+def format_restricted_attrs(attrs):
+    parts = []
+    has_src = False
+    for name, value in attrs:
+        lname = name.lower()
+        if lname.startswith("on"):
+            continue
+        if value is None:
+            parts.append(" " + name)
+            continue
+        if lname == "style":
+            cleaned = sanitize_style(value)
+            if cleaned:
+                parts.append(_quote_attr("style", cleaned))
+            continue
+        if lname in RESOURCE_ATTRS:
+            url = safe_qrz_url(value)
+            if not url:
+                continue
+            attr = "src" if lname in ("src", "source") else lname
+            if attr == "src":
+                has_src = True
+            parts.append(_quote_attr(attr, url))
+            continue
+        if lname == "href":
+            continue
+        if lname in DROP_ATTRS or "src" in lname:
+            continue
+        parts.append(_quote_attr(name, value))
+    return "".join(parts), has_src
+
+
+def format_absolutized_attrs(attrs, base):
+    parts = []
+    for name, value in attrs:
+        lname = name.lower()
+        if value is None:
+            parts.append(" " + name)
+            continue
+        if lname in ("src", "source", "href", "background"):
+            attr = "src" if lname in ("src", "source") else lname
+            parts.append(_quote_attr(attr, urljoin(base, value)))
+            continue
+        parts.append(_quote_attr(name, value))
+    return "".join(parts)
+
+
+def transform_html_tags(html, rewrite_attrs, rewrite_close=None):
+    text = html or ""
+    pieces = []
+    i = 0
+    n = len(text)
+    while i < n:
+        lt = text.find("<", i)
+        if lt == -1:
+            pieces.append(text[i:])
+            break
+        pieces.append(text[i:lt])
+        if text.startswith("<!--", lt):
+            end = text.find("-->", lt + 4)
+            if end == -1:
+                break
+            i = end + 3
+            continue
+        if lt + 1 < n and text[lt + 1] == "/":
+            end = text.find(">", lt)
+            if end == -1:
+                break
+            close_name = text[lt + 2:end].strip().split()[0] if end > lt + 2 else ""
+            rewritten = rewrite_close(close_name) if rewrite_close else text[lt:end + 1]
+            if rewritten is not None:
+                pieces.append(rewritten)
+            i = end + 1
+            continue
+        j = lt + 1
+        if j < n and text[j] == "!":
+            end = text.find(">", j)
+            i = n if end == -1 else end + 1
+            continue
+        if j >= n or not text[j].isalpha():
+            pieces.append("<")
+            i = lt + 1
+            continue
+        name_start = j
+        while j < n and (text[j].isalnum() or text[j] in "-:"):
+            j += 1
+        tag = text[name_start:j]
+        quote = None
+        while j < n:
+            ch = text[j]
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch == ">":
+                break
+            j += 1
+        if j >= n:
+            break
+        attr_str = text[lt + 1 + len(tag):j]
+        self_close = attr_str.rstrip().endswith("/")
+        if self_close:
+            attr_str = attr_str.rstrip()[:-1]
+        rewritten = rewrite_attrs(tag, parse_html_attrs(attr_str), self_close)
+        if rewritten is not None:
+            pieces.append(rewritten)
+        i = j + 1
+    return "".join(pieces)
+
+
+def _html_escape(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _anchor_href(attrs):
+    for name, value in attrs:
+        if name.lower() == "href" and value:
+            return display_link_url(value)
+    return ""
+
+
+def _anchor_suffix(href):
+    if not href:
+        return ""
+    return " [" + _html_escape(href) + "]"
+
+
+def restrict_html_urls(html):
+    href_stack = []
+
+    def rewrite(tag, attrs, self_close):
+        if tag.lower() == "a":
+            href = _anchor_href(attrs)
+            if self_close:
+                return _anchor_suffix(href).lstrip()
+            href_stack.append(href)
+            return ""
+        attr_html, has_src = format_restricted_attrs(attrs)
+        if tag.lower() == "img" and not has_src:
+            return None
+        close = " />" if self_close else ">"
+        return "<" + tag + attr_html + close
+
+    def rewrite_close(tag):
+        if tag.lower() == "a":
+            href = href_stack.pop() if href_stack else ""
+            return _anchor_suffix(href)
+        return "</" + tag + ">"
+
+    return transform_html_tags(html, rewrite, rewrite_close)
 
 
 def sanitize_payload(payload):
@@ -403,33 +661,17 @@ def sanitize_images(html):
 
 
 def absolutize_urls(html, base=QRZ_BASE_URL):
-    def repl_src(match):
-        return 'src="' + urljoin(base, match.group(1)) + '"'
+    def rewrite(tag, attrs, self_close):
+        close = " />" if self_close else ">"
+        return "<" + tag + format_absolutized_attrs(attrs, base) + close
 
-    def repl_href(match):
-        return 'href="' + urljoin(base, match.group(1)) + '"'
-
-    html = re.sub(r'src=["\']([^"\']+)["\']', repl_src, html, flags=re.I)
-    html = re.sub(r'href=["\']([^"\']+)["\']', repl_href, html, flags=re.I)
-    return html
-
-
-def strip_dark_theme_styles(html):
-    def repl_style(match):
-        style = match.group(1)
-        style = re.sub(r"color\s*:\s*(#fff(?:fff)?|white)\s*;?", "", style, flags=re.I)
-        style = re.sub(r"background(-color)?\s*:\s*[^;\"']+;?", "", style, flags=re.I)
-        style = style.strip()
-        return f'style="{style}"' if style else ""
-
-    return re.sub(r'style=["\']([^"\']*)["\']', repl_style, html, flags=re.I)
+    return transform_html_tags(html, rewrite)
 
 
 def rich_html(html):
     text = re.sub(r"<script[\s\S]*?</script>", "", html or "", flags=re.I)
     text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
     text = re.sub(r"""\son\w+\s*=\s*['"][^'"]*['"]""", "", text)
-    text = strip_dark_theme_styles(text)
     text = delazify_images(text)
     text = sanitize_images(text)
     text = absolutize_urls(text)
