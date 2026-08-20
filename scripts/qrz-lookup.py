@@ -190,20 +190,43 @@ RESOURCE_ATTRS = {
     "dynsrc",
     "lowsrc",
 }
-DROP_ATTRS = {
-    "srcset",
-    "poster",
-    "cite",
-    "formaction",
-    "action",
-    "longdesc",
-    "dynsrc",
-    "lowsrc",
-    "usemap",
-    "codebase",
-    "classid",
-    "data",
+ALLOWED_TAGS = {
+    "p", "div", "span", "br", "hr",
+    "b", "strong", "i", "em", "u", "s", "strike", "del", "ins",
+    "sub", "sup", "small", "big", "tt", "code", "pre", "kbd", "samp",
+    "var", "cite", "dfn", "blockquote", "address", "center", "nobr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption",
+    "img", "font",
 }
+ALLOWED_ATTRS = {
+    "style", "class", "id", "title", "alt",
+    "width", "height", "align", "valign", "dir", "lang",
+    "colspan", "rowspan", "border", "cellpadding", "cellspacing",
+    "bgcolor", "color", "face", "size", "span", "start",
+    "clear", "noshade", "hspace", "vspace", "scope", "headers",
+    "abbr", "compact", "nowrap",
+}
+DROP_WITH_CONTENT_TAGS = {
+    "script", "style", "iframe", "object", "applet",
+    "frame", "frameset", "svg", "math", "video", "audio", "canvas",
+    "template", "noscript", "head", "title",
+    "xmp", "plaintext", "listing", "foreignobject",
+}
+VOID_DROP_TAGS = {
+    "link", "meta", "base", "embed", "col", "param", "source", "track",
+    "area", "input", "keygen", "command", "wbr",
+}
+DANGEROUS_CSS_SCHEMES = (
+    "file:",
+    "javascript:",
+    "vbscript:",
+    "data:",
+    "qrc:",
+    "about:",
+    "blob:",
+)
 
 
 def extract_css_url(value):
@@ -238,6 +261,8 @@ def sanitize_style(style):
                 kept.append(f"background-image: url({safe})")
             continue
         if "url(" in value.lower():
+            continue
+        if any(scheme in value.lower() for scheme in DANGEROUS_CSS_SCHEMES):
             continue
         kept.append(piece)
     return "; ".join(kept)
@@ -293,15 +318,24 @@ def _quote_attr(name, value):
     return f' {name}="{escaped}"'
 
 
+def _safe_dimension(value):
+    match = re.fullmatch(r"(\d{1,6})(%|px)?", str(value or "").strip(), re.I)
+    if not match:
+        return ""
+    number = min(int(match.group(1)), 4096)
+    return f"{number}{match.group(2) or ''}"
+
+
 def format_restricted_attrs(attrs):
     parts = []
     has_src = False
     for name, value in attrs:
         lname = name.lower()
-        if lname.startswith("on"):
+        if lname.startswith("on") or "href" in lname or ("src" in lname and lname not in RESOURCE_ATTRS):
             continue
         if value is None:
-            parts.append(" " + name)
+            if lname in ALLOWED_ATTRS:
+                parts.append(" " + name)
             continue
         if lname == "style":
             cleaned = sanitize_style(value)
@@ -317,9 +351,12 @@ def format_restricted_attrs(attrs):
                 has_src = True
             parts.append(_quote_attr(attr, url))
             continue
-        if lname == "href":
+        if lname not in ALLOWED_ATTRS:
             continue
-        if lname in DROP_ATTRS or "src" in lname:
+        if lname in ("width", "height"):
+            dim = _safe_dimension(value)
+            if dim:
+                parts.append(_quote_attr(lname, dim))
             continue
         parts.append(_quote_attr(name, value))
     return "".join(parts), has_src
@@ -338,6 +375,25 @@ def format_absolutized_attrs(attrs, base):
             continue
         parts.append(_quote_attr(name, value))
     return "".join(parts)
+
+
+def local_tag_name(tag):
+    return str(tag or "").lower().split(":")[-1]
+
+
+def skip_until_close_tag(text, pos, tag):
+    match = re.compile(rf"</{re.escape(tag)}\b[^>]*>", re.I).search(text, pos)
+    if not match:
+        return len(text)
+    return match.end()
+
+
+def strip_raw_blocks(html):
+    text = html or ""
+    for tag in ("script", "style"):
+        text = re.sub(rf"<{tag}\b[^>]*>[\s\S]*?</{tag}\b[^>]*>", "", text, flags=re.I)
+        text = re.sub(rf"<{tag}\b[^>]*>[\s\S]*$", "", text, flags=re.I)
+    return text
 
 
 def transform_html_tags(html, rewrite_attrs, rewrite_close=None):
@@ -372,6 +428,10 @@ def transform_html_tags(html, rewrite_attrs, rewrite_close=None):
             end = text.find(">", j)
             i = n if end == -1 else end + 1
             continue
+        if j < n and text[j] == "?":
+            end = text.find("?>", j)
+            i = n if end == -1 else end + 2
+            continue
         if j >= n or not text[j].isalpha():
             pieces.append("<")
             i = lt + 1
@@ -395,6 +455,13 @@ def transform_html_tags(html, rewrite_attrs, rewrite_close=None):
             break
         attr_str = text[lt + 1 + len(tag):j]
         self_close = attr_str.rstrip().endswith("/")
+        ltag = local_tag_name(tag)
+        if ltag in VOID_DROP_TAGS or (ltag in DROP_WITH_CONTENT_TAGS and self_close):
+            i = j + 1
+            continue
+        if ltag in DROP_WITH_CONTENT_TAGS:
+            i = skip_until_close_tag(text, j + 1, tag)
+            continue
         if self_close:
             attr_str = attr_str.rstrip()[:-1]
         rewritten = rewrite_attrs(tag, parse_html_attrs(attr_str), self_close)
@@ -425,23 +492,29 @@ def restrict_html_urls(html):
     href_stack = []
 
     def rewrite(tag, attrs, self_close):
-        if tag.lower() == "a":
+        ltag = local_tag_name(tag)
+        if ltag == "a":
             href = _anchor_href(attrs)
             if self_close:
                 return _anchor_suffix(href).lstrip()
             href_stack.append(href)
             return ""
+        if ltag not in ALLOWED_TAGS:
+            return ""
         attr_html, has_src = format_restricted_attrs(attrs)
-        if tag.lower() == "img" and not has_src:
+        if ltag == "img" and not has_src:
             return None
         close = " />" if self_close else ">"
         return "<" + tag + attr_html + close
 
     def rewrite_close(tag):
-        if tag.lower() == "a":
+        ltag = local_tag_name(tag)
+        if ltag == "a":
             href = href_stack.pop() if href_stack else ""
             return _anchor_suffix(href)
-        return "</" + tag + ">"
+        if ltag in ALLOWED_TAGS:
+            return "</" + tag + ">"
+        return ""
 
     return transform_html_tags(html, rewrite, rewrite_close)
 
@@ -669,8 +742,7 @@ def absolutize_urls(html, base=QRZ_BASE_URL):
 
 
 def rich_html(html):
-    text = re.sub(r"<script[\s\S]*?</script>", "", html or "", flags=re.I)
-    text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
+    text = strip_raw_blocks(html or "")
     text = re.sub(r"""\son\w+\s*=\s*['"][^'"]*['"]""", "", text)
     text = delazify_images(text)
     text = sanitize_images(text)

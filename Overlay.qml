@@ -256,6 +256,42 @@ Item {
       Qt.openUrlExternally(safe)
   }
 
+  function localTagName(tag) {
+    var t = String(tag || "").toLowerCase()
+    var colon = t.lastIndexOf(":")
+    return colon === -1 ? t : t.slice(colon + 1)
+  }
+
+  function isAllowedBioTag(tag) {
+    var t = " " + root.localTagName(tag) + " "
+    return " p div span br hr b strong i em u s strike del ins sub sup small big tt code pre kbd samp var cite dfn blockquote address center nobr h1 h2 h3 h4 h5 h6 ul ol li dl dt dd table thead tbody tfoot tr td th caption img font ".indexOf(t) !== -1
+  }
+
+  function isDropWithContentTag(tag) {
+    var t = " " + root.localTagName(tag) + " "
+    return " script style iframe object applet frame frameset svg math video audio canvas template noscript head title xmp plaintext listing foreignobject ".indexOf(t) !== -1
+  }
+
+  function isVoidDropTag(tag) {
+    var t = " " + root.localTagName(tag) + " "
+    return " link meta base embed col param source track area input keygen command wbr ".indexOf(t) !== -1
+  }
+
+  function isAllowedBioAttr(name) {
+    var t = " " + String(name || "").toLowerCase() + " "
+    return " style class id title alt width height align valign dir lang colspan rowspan border cellpadding cellspacing bgcolor color face size span start clear noshade hspace vspace scope headers abbr compact nowrap ".indexOf(t) !== -1
+  }
+
+  function safeDimension(value) {
+    var match = String(value || "").trim().match(/^(\d{1,6})(%|px)?$/i)
+    if (!match)
+      return ""
+    var n = parseInt(match[1], 10)
+    if (n > 4096)
+      n = 4096
+    return String(n) + (match[2] || "")
+  }
+
   function isHtmlSpace(ch) {
     return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f"
   }
@@ -354,6 +390,9 @@ Item {
       }
       if (value.toLowerCase().indexOf("url(") !== -1)
         continue
+      var lowered = value.toLowerCase()
+      if (lowered.indexOf("file:") !== -1 || lowered.indexOf("javascript:") !== -1 || lowered.indexOf("vbscript:") !== -1 || lowered.indexOf("data:") !== -1 || lowered.indexOf("qrc:") !== -1 || lowered.indexOf("about:") !== -1 || lowered.indexOf("blob:") !== -1)
+        continue
       kept.push(piece)
     }
     return kept.join("; ")
@@ -370,10 +409,11 @@ Item {
       var name = String(attrs[i].name || "")
       var value = attrs[i].value
       var lname = name.toLowerCase()
-      if (lname.indexOf("on") === 0)
+      if (lname.indexOf("on") === 0 || lname.indexOf("href") !== -1 || (lname.indexOf("src") !== -1 && lname !== "src" && lname !== "source"))
         continue
       if (value === null) {
-        parts += " " + name
+        if (root.isAllowedBioAttr(lname))
+          parts += " " + name
         continue
       }
       if (lname === "style") {
@@ -392,10 +432,14 @@ Item {
         parts += root.quoteHtmlAttr(attr, url)
         continue
       }
-      if (lname === "href")
+      if (!root.isAllowedBioAttr(lname))
         continue
-      if (lname === "srcset" || lname === "cite" || lname === "formaction" || lname === "action" || lname === "longdesc" || lname === "usemap" || lname === "codebase" || lname === "classid" || lname === "data" || lname.indexOf("src") !== -1)
+      if (lname === "width" || lname === "height") {
+        var dim = root.safeDimension(value)
+        if (dim)
+          parts += root.quoteHtmlAttr(lname, dim)
         continue
+      }
       parts += root.quoteHtmlAttr(name, value)
     }
     return { html: parts, hasSrc: hasSrc }
@@ -435,6 +479,27 @@ Item {
     return href ? (" [" + root.escapeHtmlText(href) + "]") : ""
   }
 
+  function skipUntilCloseTag(text, pos, tagName) {
+    var lower = text.toLowerCase()
+    var needle = "</" + String(tagName || "").toLowerCase()
+    var from = pos
+    while (from < text.length) {
+      var found = lower.indexOf(needle, from)
+      if (found === -1)
+        return text.length
+      var after = found + needle.length
+      if (after < text.length && /[A-Za-z0-9:-]/.test(text.charAt(after))) {
+        from = after
+        continue
+      }
+      var gt = text.indexOf(">", after)
+      if (gt === -1)
+        return text.length
+      return gt + 1
+    }
+    return text.length
+  }
+
   function restrictHtmlUrls(html) {
     var text = String(html || "")
     var out = ""
@@ -462,7 +527,7 @@ Item {
         if (closeName.toLowerCase() === "a") {
           var href = hrefStack.length ? hrefStack.pop() : ""
           out += root.anchorSuffix(href)
-        } else {
+        } else if (root.isAllowedBioTag(closeName)) {
           out += text.slice(lt, closeEnd + 1)
         }
         i = closeEnd + 1
@@ -472,6 +537,11 @@ Item {
       if (j < text.length && text.charAt(j) === "!") {
         var declEnd = text.indexOf(">", j)
         i = declEnd === -1 ? text.length : declEnd + 1
+        continue
+      }
+      if (j < text.length && text.charAt(j) === "?") {
+        var piEnd = text.indexOf("?>", j)
+        i = piEnd === -1 ? text.length : piEnd + 2
         continue
       }
       if (j >= text.length || !/[A-Za-z]/.test(text.charAt(j))) {
@@ -502,8 +572,17 @@ Item {
       var selfClose = attrStr.replace(/\s+$/, "").slice(-1) === "/"
       if (selfClose)
         attrStr = attrStr.replace(/\s+$/, "").slice(0, -1)
+      var ltag = root.localTagName(tag)
+      if (root.isVoidDropTag(tag) || (root.isDropWithContentTag(tag) && selfClose)) {
+        i = j + 1
+        continue
+      }
+      if (root.isDropWithContentTag(tag)) {
+        i = root.skipUntilCloseTag(text, j + 1, tag)
+        continue
+      }
       var parsedAttrs = root.parseHtmlAttrs(attrStr)
-      if (tag.toLowerCase() === "a") {
+      if (ltag === "a") {
         var anchorHref = root.attrHref(parsedAttrs)
         if (selfClose)
           out += root.anchorSuffix(anchorHref).replace(/^\s+/, "")
@@ -512,8 +591,12 @@ Item {
         i = j + 1
         continue
       }
+      if (!root.isAllowedBioTag(tag)) {
+        i = j + 1
+        continue
+      }
       var rewritten = root.formatRestrictedAttrs(parsedAttrs)
-      if (!(tag.toLowerCase() === "img" && !rewritten.hasSrc))
+      if (!(ltag === "img" && !rewritten.hasSrc))
         out += "<" + tag + rewritten.html + (selfClose ? " />" : ">")
       i = j + 1
     }
