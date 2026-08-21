@@ -354,8 +354,121 @@ Item {
     return match ? String(match[2] || "").trim() : ""
   }
 
+  function htmlUnescape(text) {
+    var s = String(text || "")
+    var named = {
+      "colon": ":", "sol": "/", "bsol": "\\", "period": ".",
+      "quot": "\"", "amp": "&", "lt": "<", "gt": ">", "apos": "'", "nbsp": " "
+    }
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+      var amp = s.indexOf("&", i)
+      if (amp === -1) {
+        out += s.slice(i)
+        break
+      }
+      out += s.slice(i, amp)
+      var semi = s.indexOf(";", amp + 1)
+      if (semi === -1 || semi - amp > 32) {
+        out += "&"
+        i = amp + 1
+        continue
+      }
+      var ent = s.slice(amp + 1, semi)
+      if (ent.charAt(0) === "#") {
+        var num = (ent.charAt(1) === "x" || ent.charAt(1) === "X") ? parseInt(ent.slice(2), 16) : parseInt(ent.slice(1), 10)
+        if (num)
+          out += String.fromCharCode(num)
+      } else if (named[ent.toLowerCase()] !== undefined) {
+        out += named[ent.toLowerCase()]
+      } else {
+        out += s.slice(amp, semi + 1)
+      }
+      i = semi + 1
+    }
+    return out
+  }
+
+  function cssStripComments(text) {
+    var s = String(text || "")
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+      var start = s.indexOf("/*", i)
+      if (start === -1) {
+        out += s.slice(i)
+        break
+      }
+      out += s.slice(i, start)
+      var end = s.indexOf("*/", start + 2)
+      if (end === -1)
+        break
+      i = end + 2
+    }
+    return out
+  }
+
+  function cssUnescape(text) {
+    var s = String(text || "")
+    var out = ""
+    var i = 0
+    var hex = "0123456789abcdefABCDEF"
+    function isHex(ch) { return hex.indexOf(ch) !== -1 }
+    function isCssSpace(ch) { return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" }
+    while (i < s.length) {
+      var ch = s.charAt(i)
+      if (ch !== "\\") {
+        out += ch
+        i += 1
+        continue
+      }
+      if (i + 1 >= s.length)
+        break
+      var nxt = s.charAt(i + 1)
+      if (nxt === "\n" || nxt === "\r" || nxt === "\f") {
+        i += 2
+        if (nxt === "\r" && i < s.length && s.charAt(i) === "\n")
+          i += 1
+        continue
+      }
+      if (isHex(nxt)) {
+        var j = i + 1
+        var digits = ""
+        while (j < s.length && digits.length < 6 && isHex(s.charAt(j))) {
+          digits += s.charAt(j)
+          j += 1
+        }
+        var code = parseInt(digits, 16)
+        if (!code || (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF)
+          out += "\uFFFD"
+        else
+          out += String.fromCharCode(code)
+        if (j < s.length && isCssSpace(s.charAt(j))) {
+          if (s.charAt(j) === "\r" && j + 1 < s.length && s.charAt(j + 1) === "\n")
+            j += 2
+          else
+            j += 1
+        }
+        i = j
+        continue
+      }
+      out += nxt
+      i += 2
+    }
+    return out
+  }
+
+  function normalizeCssText(style) {
+    var text = root.cssUnescape(root.cssStripComments(root.htmlUnescape(String(style || ""))))
+    text = text.replace(/url\s*\(/gi, "url(")
+    text = text.replace(/image-set\s*\(/gi, "image-set(")
+    text = text.replace(/cross-fade\s*\(/gi, "cross-fade(")
+    return text
+  }
+
   function sanitizeCss(style) {
-    var parts = String(style || "").split(";")
+    var parts = root.normalizeCssText(style).split(";")
     var kept = []
     for (var i = 0; i < parts.length; i++) {
       var piece = parts[i].trim()
@@ -388,9 +501,9 @@ Item {
           kept.push("background: " + bits.join(" "))
         continue
       }
-      if (value.toLowerCase().indexOf("url(") !== -1)
-        continue
       var lowered = value.toLowerCase()
+      if (lowered.indexOf("url(") !== -1 || lowered.indexOf("image-set(") !== -1 || lowered.indexOf("cross-fade(") !== -1)
+        continue
       if (lowered.indexOf("file:") !== -1 || lowered.indexOf("javascript:") !== -1 || lowered.indexOf("vbscript:") !== -1 || lowered.indexOf("data:") !== -1 || lowered.indexOf("qrc:") !== -1 || lowered.indexOf("about:") !== -1 || lowered.indexOf("blob:") !== -1)
         continue
       kept.push(piece)

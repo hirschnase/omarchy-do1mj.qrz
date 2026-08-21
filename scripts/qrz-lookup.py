@@ -236,9 +236,68 @@ def extract_css_url(value):
     return match.group(2).strip()
 
 
+def css_strip_comments(text):
+    return re.sub(r"/\*.*?\*/", "", text or "", flags=re.S)
+
+
+def css_unescape(text):
+    raw = text or ""
+    out = []
+    i = 0
+    n = len(raw)
+    hexdigits = set("0123456789abcdefABCDEF")
+    whitespace = set(" \t\n\r\f")
+    while i < n:
+        ch = raw[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        nxt = raw[i + 1]
+        if nxt in "\n\r\f":
+            i += 2
+            if nxt == "\r" and i < n and raw[i] == "\n":
+                i += 1
+            continue
+        if nxt in hexdigits:
+            j = i + 1
+            digits = []
+            while j < n and len(digits) < 6 and raw[j] in hexdigits:
+                digits.append(raw[j])
+                j += 1
+            try:
+                codepoint = int("".join(digits), 16)
+            except ValueError:
+                codepoint = 0xFFFD
+            if codepoint == 0 or 0xD800 <= codepoint <= 0xDFFF or codepoint > 0x10FFFF:
+                out.append("\uFFFD")
+            else:
+                out.append(chr(codepoint))
+            if j < n and raw[j] in whitespace:
+                if raw[j] == "\r" and j + 1 < n and raw[j + 1] == "\n":
+                    j += 2
+                else:
+                    j += 1
+            i = j
+            continue
+        out.append(nxt)
+        i += 2
+    return "".join(out)
+
+
+def normalize_css_text(style):
+    text = css_unescape(css_strip_comments(unescape(str(style or ""))))
+    text = re.sub(r"url\s*\(", "url(", text, flags=re.I)
+    text = re.sub(r"image-set\s*\(", "image-set(", text, flags=re.I)
+    text = re.sub(r"cross-fade\s*\(", "cross-fade(", text, flags=re.I)
+    return text
+
+
 def sanitize_style(style):
     kept = []
-    for part in (style or "").split(";"):
+    for part in normalize_css_text(style).split(";"):
         piece = part.strip()
         if not piece or ":" not in piece:
             continue
@@ -260,9 +319,10 @@ def sanitize_style(style):
             if safe:
                 kept.append(f"background-image: url({safe})")
             continue
-        if "url(" in value.lower():
+        lowered = value.lower()
+        if "url(" in lowered or "image-set(" in lowered or "cross-fade(" in lowered:
             continue
-        if any(scheme in value.lower() for scheme in DANGEROUS_CSS_SCHEMES):
+        if any(scheme in lowered for scheme in DANGEROUS_CSS_SCHEMES):
             continue
         kept.append(piece)
     return "; ".join(kept)
